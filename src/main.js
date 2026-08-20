@@ -8,6 +8,10 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
 const BALL_RADIUS = 0.44;                    // 足球半径（用户要求 ×4 → 直径 0.88m）
 const PLAYER_HEIGHT = 3.5;                      // 球员目标高度 3.5m（用户要求 ×2）
 const PLAYER_PART_SCALE = PLAYER_HEIGHT / 1.66; // 程序化小人高 1.66m → 缩放到 3.5m
+const PLAYER_COLORS = [0xe63946, 0x2f80ed, 0xf2c94c, 0x27ae60]; // 4 人球衣颜色：红蓝黄绿
+const PLAYER_SPAWNS = [[0, -12], [0, 12], [-15, 0], [15, 0]];   // 4 人出生点
+const TEAMS = [0, 0, 1, 1]; // 按颜色顺序分队：红蓝=队0（守 x=-34），黄绿=队1（守 x=+34）
+const TEAM_NAMES = ['红蓝', '黄绿'];
 const STADIUM_SCALE = 1;                      // 新球场模型直接使用米单位（约 66×7×37m 小型球场）
 let GROUND_Y = 0;                             // 场地表面高度（加载后用射线探测球场表面精确高度）
 
@@ -173,8 +177,8 @@ async function loadBinaryGeometry(url) {
 // ⚠️ 关键：所有部件必须是「单层」—— 直接返回平铺的 Mesh 数组。
 // 实测本环境 WebGL 对「Group→Group→Mesh」两层嵌套的网格不渲染（驱动层怪问题），
 // 因此不用 pivot Group 做骨骼，改用「几何中心偏移」实现绕髋/肩摆动。
-function makePlayerParts() {
-  const shirtMat = new THREE.MeshPhongMaterial({ color: 0xe63946 });  // 红色球衣
+function makePlayerParts(shirtColor = 0xe63946) {
+  const shirtMat = new THREE.MeshPhongMaterial({ color: shirtColor });  // 球衣颜色（可定制）
   const shortsMat = new THREE.MeshPhongMaterial({ color: 0x22223a }); // 深色短裤
   const skinMat = new THREE.MeshPhongMaterial({ color: 0xffd9b3 });   // 肤色
 
@@ -219,6 +223,31 @@ function makeShadow(size, opacity) {
   mesh.position.y = 0.02;
   mesh.renderOrder = 5;
   return mesh;
+}
+
+// 创建一个球员（球衣颜色 + 出生点），返回 { group, body, parts }
+function createPlayer(shirtColor, spawnX, spawnZ) {
+  const parts = makePlayerParts(shirtColor);
+  parts.parts.forEach(p => { p.material = toBasicMaterial(p.material); }); // 无光照
+  const group = new THREE.Group();
+  const body = new THREE.Group(); // 身体容器（姿态：前倾/起伏作用于此）
+  body.scale.setScalar(PLAYER_PART_SCALE);
+  parts.parts.forEach(p => body.add(p));
+  group.add(body);
+  const shadow = makeShadow(4.2, 0.5);
+  shadow.position.y = 0.02;
+  group.add(shadow);
+  group.position.set(spawnX, GROUND_Y, spawnZ);
+  group.rotation.y = Math.PI / 2;
+  group.traverse((n) => {
+    if (n.isMesh && n.material && n.name !== 'shadow') {
+      n.material.depthTest = true;
+      n.material.depthWrite = true;
+      n.material.side = THREE.FrontSide;
+    }
+  });
+  scene.add(group);
+  return { group, body, parts };
 }
 
 // 拆分球员网格 → 四肢可独立摆动（跑动/踢球动画）
@@ -400,9 +429,7 @@ function makeSoccerBall() {
 }
 
 async function loadAll() {
-  // 1. 球员：程序化卡通小人（Box/Sphere 组合，分体四肢可独立摆动，无需 FBX）
-  playerParts = makePlayerParts();
-  playerParts.parts.forEach(p => { p.material = toBasicMaterial(p.material); }); // 无光照
+  // 1. 球员：4 人混战（本地红色 + 3 个远程占位蓝黄绿，下面组装时创建）
   loadedCount = 1;
 
   // 2. 球场（"单元几何+transform 组装"式模型：保留内部变换，非均匀缩放 → 70×7×37m）
@@ -449,33 +476,22 @@ async function loadAll() {
   ballModel.material = toBasicMaterial(ballModel.material); // 无光照
   loadedCount = 3;
 
-  // ---- 组装 ----
-  const player = new THREE.Group();
-  const playerModel = new THREE.Group(); // 小人身体容器（姿态：前倾/起伏/翻转作用于此）
-  playerModel.scale.setScalar(PLAYER_PART_SCALE); // 1.66m → 3.5m
-  playerParts.parts.forEach(p => playerModel.add(p));
-  player.add(playerModel);
-  const playerShadow = makeShadow(4.2, 0.5);
-  playerShadow.position.y = 0.02; // 阴影贴场地表面（player Group 已在 GROUND_Y）
-  player.add(playerShadow);
-  player.position.set(0, GROUND_Y, 0);
-  player.rotation.y = Math.PI / 2; // 初始面向 +x（球场长边=球门方向）
-  // 球员正常深度测试 + 单面渲染（站在场地表面之上，透视正确）
-  player.traverse((n) => {
-    if (n.isMesh && n.material && n.name !== 'shadow') {
-      n.material.depthTest = true;
-      n.material.depthWrite = true;
-      n.material.side = THREE.FrontSide;
-    }
-  });
-  scene.add(player);
+  // ---- 组装：4 个球员（红蓝黄绿），players[localPlayerId] 是本地 ----
+  players = [];
+  for (let i = 0; i < 4; i++) {
+    players.push(createPlayer(PLAYER_COLORS[i], PLAYER_SPAWNS[i][0], PLAYER_SPAWNS[i][1]));
+  }
+  localPlayerId = 0; // 默认单机：本地=红
+  const player = players[0].group;
+  const playerModel = players[0].body;
+  playerParts = players[0].parts;
 
   const ball = new THREE.Group();
   ball.add(ballModel);
   const ballShadow = makeShadow(1.5, 0.4);
   ballShadow.position.y = -BALL_RADIUS + 0.02; // 阴影贴地面（球心离地 BALL_RADIUS）
   ball.add(ballShadow);
-  ball.position.set(DRIBBLE_OFF, GROUND_Y + BALL_RADIUS, 0); // 初始放在球员脚前（带球范围内，球员面向 +x）
+  ball.position.set(0, GROUND_Y + BALL_RADIUS, 0); // 4 人混战：球放中场，各自去抢
   // 球正常深度测试 + 单面渲染（会被看台正确遮挡）
   ball.traverse((n) => {
     if (n.isMesh && n.material && n.name !== 'shadow') {
@@ -491,14 +507,17 @@ async function loadAll() {
 
 // ================= 游戏状态 =================
 let player, playerModel, ball, ballModel;
-let playerParts; // 程序化小人的四肢引用 { legL, legR, armL, armR, body }
+let playerParts; // 本地玩家的四肢引用 { legL, legR, armL, armR, body }
+let players = []; // 4 个球员对象 { group, body, parts }（players[localPlayerId] 是本地）
+let localPlayerId = 0; // 本地球员索引（0=红,1=蓝,2=黄,3=绿）
 let playerVel = new THREE.Vector3();
 let ballVel = new THREE.Vector3();
 let charging = false, charge = 0, kickT = 0, passT = 0, bobT = 0;
 let passCharging = false, passCharge = 0; // 传球蓄力
 let hasBall = false; // 球是否在脚下（带球状态；球离开后禁止射门/传球/油炸）
 let croquetaT = 0; // 油炸丸子花式计时
-let goals = 0, goalFreeze = 0;
+let goalFreeze = 0;
+let teamScores = [0, 0]; // 队比分 [红蓝, 黄绿]
 let modelFlip = 0;
 let camYaw = Math.PI / 2, camPitch = 0.28, camDist = 15; // 初始相机在球员身后（球员面向 +x）
 let dragging = false;
@@ -516,20 +535,24 @@ const fpsEl = document.getElementById('fps');
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 function resetKickoff() {
-  player.position.set(0, GROUND_Y, 0);
+  player.position.set(PLAYER_SPAWNS[0][0], GROUND_Y, PLAYER_SPAWNS[0][1]); // 回到出生点
   player.rotation.y = Math.PI / 2; // 面向 +x（球门方向）
   playerVel.set(0, 0, 0);
-  ball.position.set(DRIBBLE_OFF, GROUND_Y + BALL_RADIUS, 0); // 球回到球员脚前
+  ball.position.set(0, GROUND_Y + BALL_RADIUS, 0); // 球回中场
   ballVel.set(0, 0, 0);
   ball.quaternion.identity();
 }
 
-function onGoal() {
-  goals++;
-  goalsEl.textContent = goals;
+function onGoal(team) {
+  teamScores[team]++;
+  goalsEl.textContent = `${TEAM_NAMES[0]} ${teamScores[0]} : ${teamScores[1]} ${TEAM_NAMES[1]}`;
   goalEl.classList.add('show');
   ballVel.set(0, 0, 0);
   goalFreeze = 2.6;
+  // 房主广播比分
+  if (netHost && ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'score', scores: teamScores }));
+  }
 }
 
 function doKick() {
@@ -537,11 +560,18 @@ function doKick() {
   powerbar.style.display = 'none';
   const ratio = charge / 1.15;
   const power = 10 + 30 * ratio; // 射门力度上限加大（10~40 m/s，射程更远）
+  kickT = 0.28;
+  if (netConnected && !netHost) {
+    // 非房主：发送踢球动作给房主，球由房主权威
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'kick', x: player.position.x, z: player.position.z, rotY: player.rotation.y + modelFlip, power, ratio }));
+    }
+    return;
+  }
   const f = new THREE.Vector3(Math.sin(player.rotation.y + modelFlip), 0, Math.cos(player.rotation.y + modelFlip));
   ballVel.copy(f).multiplyScalar(power);
   // 射门高度：短按=低平球（几乎贴地），长按=高飞球（明显飞起）
   ballVel.y = 2.0 + ratio * 7.0;
-  kickT = 0.28;
 }
 
 // 传球（只传地平球）：按下即传，球贴地滚出（不飞）
@@ -550,10 +580,16 @@ function doPass() {
   powerbar.style.display = 'none';
   const ratio = passCharge / 1.0; // 蓄力进度 0~1
   const power = 5 + 6 * ratio; // 传球力度 5~11 m/s（地平球，蓄满约滚 27m）
+  passT = 0.28;   // 短促的传球踢球动画
+  if (netConnected && !netHost) {
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'pass', x: player.position.x, z: player.position.z, rotY: player.rotation.y + modelFlip, power }));
+    }
+    return;
+  }
   const f = new THREE.Vector3(Math.sin(player.rotation.y + modelFlip), 0, Math.cos(player.rotation.y + modelFlip));
   ballVel.copy(f).multiplyScalar(power);
   ballVel.y = 0; // 地平球：无上抛速度，球贴地滚动
-  passT = 0.28;   // 短促的传球踢球动画
 }
 
 // ================= 输入 =================
@@ -663,6 +699,20 @@ function update(dt) {
     player.rotation.y += dy * Math.min(1, 14 * dt);
   }
 
+  // --- 远程球员位置插值（联机） ---
+  for (let i = 0; i < players.length; i++) {
+    if (i === localPlayerId) continue;
+    const rs = remoteStates[i];
+    if (!rs) continue;
+    const g = players[i].group;
+    g.position.x += (rs.x - g.position.x) * Math.min(1, 14 * dt);
+    g.position.z += (rs.z - g.position.z) * Math.min(1, 14 * dt);
+    let dy = rs.rotY - g.rotation.y;
+    while (dy > Math.PI) dy -= 2 * Math.PI;
+    while (dy < -Math.PI) dy += 2 * Math.PI;
+    g.rotation.y += dy * Math.min(1, 14 * dt);
+  }
+
   // --- 蓄力 ---
   if (charging) {
     charge = Math.min(charge + dt, 1.15);
@@ -674,12 +724,27 @@ function update(dt) {
     if (passCharge >= 1.0) doPass();
   }
 
-  // --- 球：带球 / 物理 ---
+  // --- 球：带球 / 物理（谁近谁带球） ---
+  const isBallAuthority = !netConnected || netHost; // 单机或房主才跑球物理
+  const ballSpeed = ballVel.length();
+  // 所有球员（本地 + 远程）
+  const playersInGame = [];
+  for (let i = 0; i < players.length; i++) {
+    playersInGame.push({ group: players[i].group, team: TEAMS[i], isLocal: i === localPlayerId });
+  }
+  // 找带球者（球速慢时，最近的球员带球）
+  let ballOwner = null;
+  if (isBallAuthority && ballSpeed < 3.0) {
+    let ownerDist = DRIBBLE_DIST;
+    for (const p of playersInGame) {
+      const d = Math.hypot(ball.position.x - p.group.position.x, ball.position.z - p.group.position.z);
+      if (d < ownerDist) { ownerDist = d; ballOwner = p; }
+    }
+  }
   const toBall = new THREE.Vector3().subVectors(ball.position, player.position);
   toBall.y = 0;
   const dist2D = toBall.length();
   const facing = new THREE.Vector3(Math.sin(player.rotation.y + modelFlip), 0, Math.cos(player.rotation.y + modelFlip));
-  const ballSpeed = ballVel.length();
 
   // 油炸丸子花式（按 C 触发）：左脚先不动（支撑）→ 右脚向右迈出 → 左脚跟上并拢，整体向右移动 2m
   if (croquetaT > 0) {
@@ -694,42 +759,48 @@ function update(dt) {
     const recover = ss(0.88, 1.0, t);
     // 位移：右脚迈出 ~0.7m + 左脚跟上 ~1.3m = 总共 2m 向右
     player.position.addScaledVector(rDir, dt * (stepR * 2.5 + stepL * 6.0));
-    // 球：右脚迈出时球拨向右前，左脚跟上时球回到身前随整体移动
-    const ballSide = stepR * 0.8;
-    const croTarget = new THREE.Vector3()
-      .copy(player.position)
-      .addScaledVector(rDir, ballSide * 0.5)
-      .addScaledVector(facing, 0.7);
-    croTarget.y = GROUND_Y + BALL_RADIUS;
-    ball.position.lerp(croTarget, 1 - Math.exp(-26 * dt));
-    ballVel.set(0, 0, 0);
+    // 球：右脚迈出时球拨向右前，左脚跟上时球回到身前随整体移动（房主/单机才做）
+    if (isBallAuthority) {
+      const ballSide = stepR * 0.8;
+      const croTarget = new THREE.Vector3()
+        .copy(player.position)
+        .addScaledVector(rDir, ballSide * 0.5)
+        .addScaledVector(facing, 0.7);
+      croTarget.y = GROUND_Y + BALL_RADIUS;
+      ball.position.lerp(croTarget, 1 - Math.exp(-26 * dt));
+      ballVel.set(0, 0, 0);
+    }
     // 横移边界保护
     player.position.x = clamp(player.position.x, -33, 33);
   }
 
-  if (goalFreeze > 0) {
+  if (isBallAuthority && goalFreeze > 0) {
     // 进球冻结
     goalFreeze -= dt;
     hasBall = false;
     if (goalFreeze <= 0) { goalEl.classList.remove('show'); resetKickoff(); }
-  } else if (dist2D < DRIBBLE_DIST && ballSpeed < 3.0) {
-    hasBall = true; // 带球：球在脚下，可操作射门/传球/油炸
-    // 带球：球吸附到身前（蓄力时也保持带球，松开才踢出）
-    // 趟球效果：球在脚前远近来回滚动（幅度较大）
+  } else if (isBallAuthority && ballOwner) {
+    hasBall = ballOwner.isLocal; // 只有本地带球时本地才能操作射门/传球/油炸
+    // 带球：球吸附到带球者身前（蓄力时也保持带球，松开才踢出）
+    const ownerFacing = new THREE.Vector3(
+      Math.sin(ballOwner.group.rotation.y + (ballOwner.isLocal ? modelFlip : 0)),
+      0,
+      Math.cos(ballOwner.group.rotation.y + (ballOwner.isLocal ? modelFlip : 0))
+    );
     const dynOff = DRIBBLE_OFF + Math.sin(bobT * 0.9) * 0.6;
     const target = new THREE.Vector3()
-      .copy(player.position)
-      .addScaledVector(facing, dynOff);
+      .copy(ballOwner.group.position)
+      .addScaledVector(ownerFacing, dynOff);
     target.y = GROUND_Y + BALL_RADIUS;
     ball.position.lerp(target, 1 - Math.exp(-14 * dt));
     ballVel.set(0, 0, 0);
-    // 滚动自转（随球员速度）
-    const pSpeed = playerVel.length();
+    // 滚动自转（随带球者速度，阶段 2 仅本地有速度）
+    const pSpeed = ballOwner.isLocal ? playerVel.length() : 0;
     if (pSpeed > 0.5) {
       const axis = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), playerVel.clone().normalize());
       ball.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(axis, (pSpeed / BALL_RADIUS) * dt));
     }
-  } else {
+  } else if (isBallAuthority) {
     hasBall = false; // 球离开：禁止射门/传球/油炸
     // 自由物理
     ballVel.y -= GRAVITY * dt;
@@ -768,12 +839,13 @@ function update(dt) {
     // x 方向球门判定：球越过球门线（±GOAL_X）且横向在球门范围内 → 进球；
     // 否则撞到球场两端反弹
     const inGoalX = Math.abs(ball.position.z) < GOAL_HALF;
+    // 2v2：球进左边球门(x=-34，红蓝守) → 黄绿(队1)得分；进右边球门(x=+34，黄绿守) → 红蓝(队0)得分
     if (ball.position.x < -GOAL_X) {
-      if (inGoalX) { ball.position.x = -GOAL_X - 1.5; onGoal(); }
+      if (inGoalX) { ball.position.x = -GOAL_X - 1.5; onGoal(1); }
       else { ball.position.x = -GOAL_X; ballVel.x = Math.abs(ballVel.x) * 0.7; }
     }
     if (ball.position.x > GOAL_X) {
-      if (inGoalX) { ball.position.x = GOAL_X + 1.5; onGoal(); }
+      if (inGoalX) { ball.position.x = GOAL_X + 1.5; onGoal(0); }
       else { ball.position.x = GOAL_X; ballVel.x = -Math.abs(ballVel.x) * 0.7; }
     }
     // 滚动自转
@@ -782,6 +854,8 @@ function update(dt) {
       const axis = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3(ballVel.x, 0, ballVel.z).normalize());
       ball.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(axis, (hsp / BALL_RADIUS) * dt));
     }
+  } else {
+    hasBall = false; // 非房主：球由房主权威广播，本地不跑物理
   }
 
   // --- 四肢摆动动画（程序化小人：直接旋转分体四肢关节） ---
@@ -838,6 +912,9 @@ function update(dt) {
     playerModel.rotation.x = kS(playerModel.rotation.x, 0);
     playerModel.rotation.z = kS(playerModel.rotation.z, 0);
   }
+
+  // --- 联机同步（上报位置 + 房主广播球） ---
+  netSync(dt, moving);
 
   // --- 第三人称相机（大幅上移：瞄准球员脚踝、更平视 → 球员占据画面上半部） ---
   const camOff = new THREE.Vector3(-Math.sin(camYaw), 0, -Math.cos(camYaw));
@@ -943,8 +1020,12 @@ loadAll().then((r) => {
     player, playerModel, ball, scene, camera, THREE, renderer,
     get ballVel() { return ballVel; },
     get playerVel() { return playerVel; },
-    get goals() { return goals; },
+    get teamScores() { return teamScores; },
     get loaded() { return true; },
+    get localPlayerId() { return localPlayerId; },
+    get netHost() { return netHost; },
+    get netConnected() { return netConnected; },
+    get playersPos() { return players.map(p => [+p.group.position.x.toFixed(2), +p.group.position.z.toFixed(2)]); },
   };
   animate();
 }).catch((err) => {
@@ -952,3 +1033,121 @@ loadAll().then((r) => {
     '<div style="color:#ff8888;font-size:18px">加载失败: ' + (err.message || err) + '</div>';
   console.error(err);
 });
+
+// ================= 局域网联机（2v2） =================
+let ws = null;
+let netConnected = false;
+let netHost = false; // 房主 = playerId 0，负责球物理 + 比分
+let remoteStates = {}; // playerId -> { x, z, rotY, moving }
+let netStateAcc = 0, netBallAcc = 0;
+
+const netPanel = document.getElementById('netPanel');
+const roomInfoEl = document.getElementById('roomInfo');
+const btnCreate = document.getElementById('btnCreate');
+const btnJoin = document.getElementById('btnJoin');
+const roomInput = document.getElementById('roomInput');
+
+function setLocalPlayer(id) {
+  localPlayerId = id;
+  const lp = players[id];
+  if (!lp) return;
+  player = lp.group;
+  playerModel = lp.body;
+  playerParts = lp.parts;
+}
+
+function connectWs(onReady) {
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  ws = new WebSocket(proto + location.host);
+  ws.onopen = () => { netConnected = true; if (onReady) onReady(); };
+  ws.onmessage = (e) => { try { handleNetMessage(JSON.parse(e.data)); } catch {} };
+  ws.onclose = () => { netConnected = false; };
+}
+
+function handleNetMessage(msg) {
+  switch (msg.type) {
+    case 'joined': {
+      netHost = (msg.playerId === 0);
+      setLocalPlayer(msg.playerId);
+      const colorName = ['红', '蓝', '黄', '绿'][msg.playerId];
+      const teamName = TEAM_NAMES[msg.team];
+      if (netHost) {
+        roomInfoEl.innerHTML = `房间号：<div class="roomCode">${msg.roomId}</div><div class="hint">你是${colorName}色（${teamName}队）<br>朋友用同一 WiFi 打开本页，输入房间号加入</div>`;
+        netPanel.onclick = () => { netPanel.style.display = 'none'; netPanel.onclick = null; };
+      } else {
+        roomInfoEl.innerHTML = `已加入房间 <b>${msg.roomId}</b><br>你是${colorName}色（${teamName}队）`;
+        setTimeout(() => { netPanel.style.display = 'none'; }, 1500);
+      }
+      break;
+    }
+    case 'state': {
+      remoteStates[msg.playerId] = { x: msg.x, z: msg.z, rotY: msg.rotY, moving: msg.moving };
+      break;
+    }
+    case 'ball': {
+      if (!netHost) { // 非房主：应用房主广播的球状态
+        ball.position.set(msg.x, msg.y, msg.z);
+        ballVel.set(msg.vx, msg.vy, msg.vz);
+      }
+      break;
+    }
+    case 'score': {
+      teamScores[0] = msg.scores[0];
+      teamScores[1] = msg.scores[1];
+      goalsEl.textContent = `${TEAM_NAMES[0]} ${teamScores[0]} : ${teamScores[1]} ${TEAM_NAMES[1]}`;
+      break;
+    }
+    case 'kick': { // 房主收到非房主的踢球动作
+      if (netHost) {
+        const f = new THREE.Vector3(Math.sin(msg.rotY), 0, Math.cos(msg.rotY));
+        ballVel.copy(f).multiplyScalar(msg.power);
+        ballVel.y = 2.0 + msg.ratio * 7.0;
+        ball.position.set(msg.x + f.x * DRIBBLE_OFF, GROUND_Y + BALL_RADIUS, msg.z + f.z * DRIBBLE_OFF);
+      }
+      break;
+    }
+    case 'pass': { // 房主收到非房主的传球动作
+      if (netHost) {
+        const f = new THREE.Vector3(Math.sin(msg.rotY), 0, Math.cos(msg.rotY));
+        ballVel.copy(f).multiplyScalar(msg.power);
+        ballVel.y = 0;
+        ball.position.set(msg.x + f.x * DRIBBLE_OFF, GROUND_Y + BALL_RADIUS, msg.z + f.z * DRIBBLE_OFF);
+      }
+      break;
+    }
+    case 'error': {
+      roomInfoEl.innerHTML = `❌ ${msg.msg}`;
+      break;
+    }
+  }
+}
+
+btnCreate.onclick = () => {
+  roomInfoEl.innerHTML = '正在创建房间...';
+  connectWs(() => { ws.send(JSON.stringify({ type: 'create' })); });
+};
+btnJoin.onclick = () => {
+  const code = roomInput.value.trim().toUpperCase();
+  if (!code) { roomInfoEl.innerHTML = '请输入房间号'; return; }
+  roomInfoEl.innerHTML = '正在加入房间...';
+  connectWs(() => { ws.send(JSON.stringify({ type: 'join', roomId: code })); });
+};
+
+// 每帧联机同步（由 update 调用）
+function netSync(dt, moving) {
+  if (!netConnected || !ws || ws.readyState !== 1) return;
+  // 上报本地位置（20fps）
+  netStateAcc += dt;
+  if (netStateAcc > 0.05) {
+    netStateAcc = 0;
+    ws.send(JSON.stringify({ type: 'state', x: player.position.x, z: player.position.z, rotY: player.rotation.y, moving }));
+  }
+  // 房主广播球状态（20fps）
+  if (netHost) {
+    netBallAcc += dt;
+    if (netBallAcc > 0.05) {
+      netBallAcc = 0;
+      ws.send(JSON.stringify({ type: 'ball', x: ball.position.x, y: ball.position.y, z: ball.position.z, vx: ballVel.x, vy: ballVel.y, vz: ballVel.z }));
+    }
+  }
+}

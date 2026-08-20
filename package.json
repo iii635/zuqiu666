@@ -15,7 +15,8 @@
   "dependencies": {
     "fflate": "^0.8.3",
     "three": "^0.185.1",
-    "vite": "^8.2.1"
+    "vite": "^8.2.1",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "puppeteer-core": "^25.8.0"
