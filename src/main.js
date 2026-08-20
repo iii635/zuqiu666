@@ -1038,6 +1038,7 @@ loadAll().then((r) => {
 let ws = null;
 let netConnected = false;
 let netHost = false; // 房主 = playerId 0，负责球物理 + 比分
+let netJoined = false; // 是否已成功加入房间（用于连接失败判断）
 let remoteStates = {}; // playerId -> { x, z, rotY, moving }
 let netStateAcc = 0, netBallAcc = 0;
 
@@ -1057,16 +1058,23 @@ function setLocalPlayer(id) {
 }
 
 function connectWs(onReady) {
+  netJoined = false;
   const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   ws = new WebSocket(proto + location.host);
   ws.onopen = () => { netConnected = true; if (onReady) onReady(); };
   ws.onmessage = (e) => { try { handleNetMessage(JSON.parse(e.data)); } catch {} };
-  ws.onclose = () => { netConnected = false; };
+  ws.onerror = () => { netConnected = false; showNetError(); };
+  ws.onclose = () => { netConnected = false; if (!netJoined) showNetError(); };
+}
+
+function showNetError() {
+  roomInfoEl.innerHTML = '❌ 连接失败<br><span class="hint">联机需要本地运行 server.js（同一 WiFi 局域网）<br>网页版(GitHub Pages)不支持联机</span>';
 }
 
 function handleNetMessage(msg) {
   switch (msg.type) {
     case 'joined': {
+      netJoined = true;
       netHost = (msg.playerId === 0);
       setLocalPlayer(msg.playerId);
       const colorName = ['红', '蓝', '黄', '绿'][msg.playerId];
