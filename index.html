@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>⚽ 第三人称足球游戏</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-family: "Microsoft YaHei", "PingFang SC", sans-serif; }
+  #app { width: 100vw; height: 100vh; }
+  canvas { display: block; touch-action: none; }
+
+  #loading { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: linear-gradient(180deg, #0b3d2e 0%, #0a5c3a 100%); color: #fff; z-index: 10; }
+  #loading .title { font-size: 26px; letter-spacing: 2px; }
+  #loading .bar { width: 340px; height: 10px; background: rgba(255,255,255,.2); border-radius: 5px; margin: 20px 0 10px; overflow: hidden; }
+  #loading .fill { height: 100%; width: 0%; background: linear-gradient(90deg, #7CFC00, #ffeb3b); transition: width .25s; border-radius: 5px; }
+  #loadPct { font-size: 14px; opacity: .8; }
+
+  #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+  #score { position: absolute; top: 12px; right: 16px; font-size: 20px; background: rgba(0,0,0,.45); padding: 8px 18px;
+    border-radius: 8px; backdrop-filter: blur(2px); }
+  #powerbar { position: absolute; left: 50%; bottom: 70px; transform: translateX(-50%); width: 300px; height: 16px;
+    background: rgba(0,0,0,.55); border-radius: 8px; border: 1px solid rgba(255,255,255,.35); display: none; }
+  #powerbar .fill { height: 100%; width: 0%; background: linear-gradient(90deg, #4caf50, #ffeb3b, #f44336); border-radius: 6px; }
+  #goal { position: absolute; top: 30%; left: 50%; transform: translate(-50%,-50%) scale(.6); font-size: 80px; font-weight: 900;
+    color: #FFD700; letter-spacing: 6px; display: none; text-shadow: 0 0 40px rgba(255,215,0,.9), 0 4px 12px rgba(0,0,0,.6);
+    opacity: 0; transition: all .35s ease; }
+  #goal.show { display: block; opacity: 1; transform: translate(-50%,-50%) scale(1); }
+  #hint { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); font-size: 13px; background: rgba(0,0,0,.4);
+    padding: 6px 16px; border-radius: 20px; backdrop-filter: blur(2px); }
+  #fps { position: absolute; bottom: 16px; right: 16px; font-size: 12px; opacity: .65; }
+
+  /* ===== 触屏按钮（手机操控） ===== */
+  #touch { position: fixed; inset: 0; pointer-events: none; z-index: 6; display: none; }
+  .tbtn { position: fixed; pointer-events: auto; user-select: none; -webkit-user-select: none; touch-action: none;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; color: #fff;
+    background: rgba(255,255,255,.16); border: 2px solid rgba(255,255,255,.45); border-radius: 14px;
+    text-shadow: 0 1px 3px rgba(0,0,0,.7); backdrop-filter: blur(1px); }
+  .tbtn:active, .tbtn.pressed { background: rgba(124,252,0,.45); border-color: rgba(124,252,0,.8); }
+  /* 虚拟摇杆（轮盘） */
+  #joyBase { position: fixed; left: 40px; bottom: 40px; width: 150px; height: 150px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,255,255,.14) 0%, rgba(255,255,255,.06) 70%);
+    border: 2px solid rgba(255,255,255,.35); pointer-events: auto; touch-action: none; }
+  #joyStick { position: absolute; left: 50%; top: 50%; width: 64px; height: 64px; border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,255,255,.5) 0%, rgba(255,255,255,.28) 100%);
+    border: 2px solid rgba(255,255,255,.6); transform: translate(-50%,-50%); pointer-events: none; }
+  #btnRun   { right: 140px; bottom: 170px; width: 68px; height: 68px; border-radius: 50%; font-size: 13px; }
+  #btnPass  { right: 216px; bottom: 170px; width: 68px; height: 68px; border-radius: 50%; font-size: 13px; }
+  #btnCro   { right: 140px; bottom: 84px;  width: 68px; height: 68px; border-radius: 50%; font-size: 13px; }
+  #btnShoot { right: 28px;  bottom: 36px;  width: 92px; height: 92px; border-radius: 50%; font-size: 16px;
+    background: rgba(255,80,80,.28); border-color: rgba(255,120,120,.7); }
+  #btnShoot:active { background: rgba(255,60,60,.6); }
+  @media (max-width: 768px) {
+    #hint { bottom: 130px; font-size: 11px; white-space: nowrap; }
+  }
+  /* 竖屏提示横屏（手机横屏自动隐藏） */
+  #rotate { position: fixed; inset: 0; z-index: 20; display: none; background: rgba(0,0,0,.93); color: #fff;
+    font-size: 22px; letter-spacing: 1px; }
+  #rotate .inner { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; line-height: 2.2; }
+  #rotate .icon { font-size: 56px; }
+  @media (orientation: portrait) and (max-width: 768px) { #rotate { display: block; } }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div id="loading">
+  <div class="title">⚽ 正在加载球场模型 ...</div>
+  <div class="bar"><div class="fill" id="loadFill"></div></div>
+  <div id="loadPct">0%</div>
+</div>
+
+<div id="hud">
+  <div id="score">⚽ 进球 <span id="goals">0</span> &nbsp;<span style="font-size:12px;opacity:.7">v40</span></div>
+  <div id="powerbar"><div class="fill" id="powerFill"></div></div>
+  <div id="goal">⚽ GOAL!</div>
+  <div id="hint">点击画面后开始控制 · 按 F 翻转球员朝向（模型方向反了时用）</div>
+  <div id="fps"></div>
+</div>
+
+<!-- 触屏操控（轮盘 + 动作按钮，PC/手机都显示） -->
+<div id="touch">
+  <div id="joyBase"><div id="joyStick"></div></div>
+  <div class="tbtn" id="btnRun">加速</div>
+  <div class="tbtn" id="btnCro">油炸</div>
+  <div class="tbtn" id="btnPass">传球<br>按住蓄力</div>
+  <div class="tbtn" id="btnShoot">射门<br>按住蓄力</div>
+</div>
+
+<!-- 竖屏提示（手机横屏游玩） -->
+<div id="rotate"><div class="inner"><div class="icon">📱↻</div>请横屏游玩<br>旋转手机后自动进入</div></div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
